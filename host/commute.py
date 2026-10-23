@@ -60,8 +60,8 @@ MIN_POLL_S = 30               # 실시간 호출 최소 간격 (하루 한도 ~1
 DELAY_MATCH_S = 180           # 열차번호가 안 맞을 때, 이 안쪽의 시간표 열차와 짝지어 지연을 잰다
 DELAY_CLAMP = (-120, 600)     # 지연 추정 허용 범위(초). 밖이면 믿지 않는다
 
-REALTIME_URL = "http://swopenAPI.seoul.go.kr/api/subway/{key}/json/realtimeStationArrival/0/10/{station}"
-TIMETABLE_URL = "http://openapi.seoul.go.kr:8088/{key}/json/SearchSTNTimeTableByIDService/1/300/{code}/{week}/2/"
+REALTIME_URL = "http://swopenAPI.seoul.go.kr/api/subway/{key}/json/realtimeStationArrival/0/30/{station}"
+TIMETABLE_URL = "http://openapi.seoul.go.kr:8088/{key}/json/SearchSTNTimeTableByIDService/1/300/{code}/{week}/{direction}/"
 SAMPLE_TIMETABLE = ROOT / "samples/timetable_samsung_weekday_outer.json"
 CACHE_DIR = HERE / "cache"
 FONT_HEADER = ROOT / "firmware/nu40_commute/commute_font.h"
@@ -78,7 +78,7 @@ NOTICE_WAIT = "연결 대기 중…"
 NOTICE_LOADING = "시간표 받는 중…"
 NOTICE_NO_TRAIN = "열차 정보 없음"
 NOTICE_ERROR = "오류… 다시 시도 중"
-NOTICE_OFF_HOURS = "퇴근 시간 아님"
+NOTICE_OFF_HOURS = "출근 시간 아님"
 
 
 def log(msg):
@@ -125,6 +125,11 @@ def parse_hhmm(text, name):
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
 
+def parse_days(text):
+    """'월,수,금' 또는 '월수금' → {0, 2, 4} (월=0). 비우면 None = 매일."""
+    days = {"월": 0, "화": 1, "수": 2, "목": 3, "금": 4, "토": 5, "일": 6}
+    picked = {days[ch] for ch in (text or "") if ch in days}
+    return picked or None
 
 class Config:
     def __init__(self):
@@ -136,18 +141,27 @@ class Config:
                 loaded.append(str(p))
             merged.update(vals)
         for k, v in os.environ.items():                # 환경변수가 최우선
-            if k in ("SEOUL_SUBWAY_KEY", "SERIAL_PORT"):
+            if k in ("SEOUL_SUBWAY_KEY", "SEOUL_REALTIME_KEY", "SERIAL_PORT"):
                 merged[k] = v
         self.loaded_files = loaded
 
         self.key = merged.get("SEOUL_SUBWAY_KEY", "").strip()
+        self.realtime_key = merged.get("SEOUL_REALTIME_KEY", "").strip() or self.key   # 실시간 지하철 전용 키
         self.port = merged.get("SERIAL_PORT", "").strip()
         self.station_name = merged.get("STATION_NAME", "삼성").strip() or "삼성"
         self.station_code = merged.get("STATION_CODE", "0219").strip() or "0219"
         self.updn_line = merged.get("UPDN_LINE", "외선").strip() or "외선"
-        self.line_hint = merged.get("LINE_HINT", "종합운동장방면").strip() or "종합운동장방면"
+        self.line_hint = merged.get("LINE_HINT", "종합운동장방면").strip()
+        self.subway_id = merged.get("SUBWAY_ID", "").strip()     # 환승역에서 다른 호선을 걸러낸다 (6호선=1006)
+        self.direction = 1 if self.updn_line in ("상행", "내선") else 2   # 시간표 API 방향 번호
         self.walk_min = self._int(merged.get("WALK_MINUTES"), 10, "WALK_MINUTES")
         self.buffer_min = self._int(merged.get("BUFFER_MINUTES"), 1, "BUFFER_MINUTES")
+        # 출근 마감 모드: ARRIVE_BY 를 비우면 원래처럼 "지금 탈 수 있는 첫 열차"만 고른다
+        self.arrive_by = parse_hhmm(merged.get("ARRIVE_BY", ""), "ARRIVE_BY")
+        self.ride_min = self._int(merged.get("RIDE_MINUTES"), 15, "RIDE_MINUTES")
+        self.dest_walk_min = self._int(merged.get("DEST_WALK_MINUTES"), 5, "DEST_WALK_MINUTES")
+        self.early_min = self._int(merged.get("ARRIVE_EARLY_MINUTES"), 5, "ARRIVE_EARLY_MINUTES")
+        self.work_days = parse_days(merged.get("WORK_DAYS", ""))
         self.on_at = parse_hhmm(merged.get("ON_AT", "18:00"), "ON_AT")
         self.off_at = parse_hhmm(merged.get("OFF_AT", "20:00"), "OFF_AT")
         self.poll_s = max(MIN_POLL_S, self._int(merged.get("REALTIME_POLL_SECONDS"), 60, "REALTIME_POLL_SECONDS"))
@@ -168,13 +182,23 @@ class Config:
     def leave_s(self):
         return (self.walk_min + self.buffer_min) * 60
 
+    def latest_board(self, day):
+        """마감에 맞추려면 출발역에서 늦어도 이 시각 열차는 타야 한다. 마감 모드가 아니면 None."""
+        if self.arrive_by is None:
+            return None
+        minutes = self.arrive_by - self.early_min - self.dest_walk_min - self.ride_min
+        return datetime.combine(day, datetime.min.time()) + timedelta(minutes=minutes)
+
     @property
     def walk_label(self):
         return f"도보{self.walk_min}분"
 
     def mask(self, text):
         """로그에 키가 섞여 나가지 않게 가린다."""
-        return text.replace(self.key, "****") if self.key else text
+        for k in (self.key, self.realtime_key):
+            if k:
+                text = text.replace(k, "****")
+        return text
 
 
 # ─────────────────────────────────────────────────────────────
@@ -228,13 +252,13 @@ class Timetable:
         self._last_try = 0.0
 
     def _cache_path(self, week):
-        return CACHE_DIR / f"timetable_{self.cfg.station_code}_w{week}.json"
+        return CACHE_DIR / f"timetable_{self.cfg.station_code}_d{self.cfg.direction}_w{week}.json"
 
     def _fetch(self, week):
         """API 에서 받아 온다. 실패하면 예외 대신 None (로그에 이유만)."""
-        if not self.cfg.key or self.requests is None:
+        if not self.cfg.realtime_key or self.requests is None:
             return None
-        url = TIMETABLE_URL.format(key=self.cfg.key, code=self.cfg.station_code, week=week)
+        url = TIMETABLE_URL.format(key=self.cfg.key, code=self.cfg.station_code, week=week, direction=self.cfg.direction)
         try:
             resp = self.requests.get(url, timeout=HTTP_TIMEOUT)
         except Exception as e:                           # 메시지에 URL(키)이 들어갈 수 있어 형만 찍는다
@@ -296,8 +320,9 @@ class Timetable:
                 rows, source = json.loads(cache.read_text(encoding="utf-8"))["rows"], "캐시(예전 것)"
             except (ValueError, KeyError):
                 pass
-        # 4) 저장소의 샘플 (평일 외선). 키 없이 돌려 볼 때
-        if rows is None and SAMPLE_TIMETABLE.exists():
+        # 4) 저장소의 샘플 (삼성역 평일 외선). 키 없이 돌려 볼 때. 다른 역이면 엉뚱한 열차가 뜨니 안 쓴다
+        is_sample_station = self.cfg.station_code == "0219" and self.cfg.direction == 2
+        if rows is None and is_sample_station and SAMPLE_TIMETABLE.exists():
             try:
                 rows = json.loads(SAMPLE_TIMETABLE.read_text(encoding="utf-8"))["SearchSTNTimeTableByIDService"]["row"]
                 source = "샘플 파일(평일) — 실제 요일과 다를 수 있음"
@@ -359,7 +384,7 @@ class Realtime:
         if time.time() - self.last_poll < self.cfg.poll_s:
             return
         self.last_poll = time.time()
-        url = REALTIME_URL.format(key=self.cfg.key, station=self.cfg.station_name)
+        url = REALTIME_URL.format(key=self.cfg.realtime_key, station=self.cfg.station_name)
         try:
             resp = self.requests.get(url, timeout=HTTP_TIMEOUT)
         except Exception as e:
@@ -384,6 +409,8 @@ class Realtime:
 
         self.visible = []
         for item in body.get("realtimeArrivalList") or []:
+            if self.cfg.subway_id and str(item.get("subwayId", "")) != self.cfg.subway_id:
+                continue # 공덕처럼 여러 호선이 서는 역에서 다른 호선 거르기
             if item.get("updnLine") != self.cfg.updn_line:
                 continue
             if self.cfg.line_hint and self.cfg.line_hint not in (item.get("trainLineNm") or ""):
@@ -504,9 +531,10 @@ def state_for(leave_in):
 class Planner:
     """'지금 탈 열차'를 고르고 상태를 정한다. 시계·시간표·지연 공급원을 바꿔 끼우면 데모가 된다."""
 
-    def __init__(self, cfg, clock, trains_for, realtime=None, speed=1):
+    def __init__(self, cfg, clock, trains_for, realtime=None, speed=1, use_deadline=False):
         self.cfg = cfg
         self.clock = clock                 # () -> datetime
+        self.use_deadline = use_deadline   # 데모는 가짜 시계라 마감을 쓰지 않는다
         self.trains_for = trains_for       # (date) -> [Train] | None
         self.realtime = realtime           # Realtime 또는 None(데모)
         self.speed = speed
@@ -535,10 +563,17 @@ class Planner:
 
     def _pick(self, trains, now):
         earliest = now + timedelta(seconds=self.cfg.leave_s)
-        for t in trains:
-            if self._eta(t) >= earliest:
-                return t
-        return None
+        catchable = [t for t in trains if self._eta(t) >= earliest]
+        if not catchable:
+            return None
+        latest = self.cfg.latest_board(now.date()) if self.use_deadline else None
+        if latest is None:
+            return catchable[0]                        # 원래 방식: 지금 탈 수 있는 첫 열차
+        on_time = [t for t in catchable if self._eta(t) <= latest]
+        if on_time:
+            return on_time[-1]                         # 마감에 맞는 열차 중 가장 늦은 것 = 가장 여유롭게 나가는 열차
+        log(f"마감({hhmm(latest)} 열차)에 맞는 열차를 놓쳤어요. 다음 열차로 안내합니다 — 지각 위험")
+        return catchable[0]
 
     def tick(self):
         """돌려주는 값: ('frame', Frame) 또는 ('notice', 문구)."""
@@ -748,6 +783,8 @@ def font_missing_chars(texts):
 # ─────────────────────────────────────────────────────────────
 def in_window(cfg, now):
     """ON_AT~OFF_AT 사이인가. 둘 다 없으면 항상 True. 자정을 넘는 구간(22:00~01:00)도 된다."""
+    if cfg.work_days is not None and now.weekday() not in cfg.work_days:
+        return False # 알바 없는 요일
     if cfg.on_at is None or cfg.off_at is None:
         return True
     cur = now.hour * 60 + now.minute
@@ -774,13 +811,16 @@ def main():
     args = ap.parse_args()
 
     print("=" * 60)
-    print(" NU40 DK 퇴근 알림 보드 — 삼성역 2호선 (서울시 지하철 API)")
-    print("=" * 60)
-
     cfg = Config()
+    print(f" NU40 DK 출근 알림 보드 — {cfg.station_name}역 {cfg.updn_line} (서울시 지하철 API)")
+    print("=" * 60)
     for f in cfg.loaded_files:
         log(f"설정 읽음: {f}")
     log(f"출발선 = 도착 {cfg.walk_min + cfg.buffer_min}분 전 (도보 {cfg.walk_min} + 여유 {cfg.buffer_min})")
+    latest = cfg.latest_board(date.today())
+    if latest is not None:
+        log(f"마감 {cfg.arrive_by // 60:02d}:{cfg.arrive_by % 60:02d} − 여유 {cfg.early_min}분 − 도착역 도보 "
+            f"{cfg.dest_walk_min}분 − 탑승 {cfg.ride_min}분 → {cfg.station_name}에서 {hhmm(latest)} 이전 열차를 탑니다")
 
     # 글꼴 검사 (문구가 보드 글꼴에 다 있나)
     missing = font_missing_chars(list(MESSAGES.values()) + [cfg.walk_label, NOTICE_WAIT, NOTICE_LOADING,
@@ -838,7 +878,7 @@ def main():
         if is_demo:
             clock = DemoClock(demo_speed, start_delay)
             return Planner(cfg, clock.now, demo_trains, realtime=None, speed=demo_speed)
-        return Planner(cfg, datetime.now, timetable.trains_for, realtime=realtime, speed=1)
+        return Planner(cfg, datetime.now, timetable.trains_for, realtime=realtime, speed=1, use_deadline=True)
 
     planner = make_planner(demo)
     log(f"모드: {'데모 (' + str(demo_speed) + '배속)' if demo else '실시간'}"
