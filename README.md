@@ -1,8 +1,11 @@
-# NU40 DK + OLED 퇴근 알림 보드
+# NU40 DK + OLED 출근 알림 보드
 
-서울시 지하철 API 로 **삼성역(2호선, 잠실 방면)** 열차 시각을 받아,
-"회사에서 **지금 나가면 탈 수 있는 열차**"를 골라 USB 로 연결된 **NU40 DK 보드의 0.96인치 OLED** 에 띄웁니다.
-열차가 레일 위를 달려 역으로 다가오고, 깃발(출발선)을 지나기 전에 캐릭터가 알려 줍니다.
+> [haeun2525/nu40-commute](https://github.com/haeun2525/nu40-commute)(삼성역 퇴근 알림 보드)를 fork 해서
+> **공덕역 → 신용산 알바 출근용**으로 고친 버전입니다.
+
+서울시 지하철 API 로 **공덕역(6호선, 효창공원앞 방면)** 열차 시각을 받아,
+"**17:00 출근에 늦지 않으면서 가장 늦게 나가도 되는 열차**"를 골라 USB 로 연결된 **NU40 DK 보드의 0.96인치 OLED** 에 띄웁니다.
+열차가 레일 위를 달려 역으로 다가오고, 나갈 시각이 되기 전에 캐릭터가 알려 줍니다.
 
 ```
 서울시 지하철 API ──REST──▶ PC(파이썬 host/commute.py) ──USB 시리얼──▶ NU40 DK ──I2C──▶ OLED
@@ -14,34 +17,74 @@
 | 여유 | 3분 넘게 남음 | `아직 여유 있어요` |
 | 짐 싸기 | 3분 이하 | `슬슬 짐 싸야 해요` |
 | 출발 | 1분 이하 | `지금 출발해야 해요!` (캐릭터가 깡총, 글자 깜빡, LED1 켜짐) |
-| 놓침 | 지남 | `놓쳤어요… 다음 거!` 5초 → 다음 열차로 |
+| 뛰면 가능 | 지남 (2분 이내) | `지금 뛰면 가능해요!` |
+| 놓침 | 2분 넘게 지남 | `놓쳤어요… 다음 거!` 5초 → 다음 열차로 |
 
-**나갈 시각 = 열차 도착 − 도보 10분 − 여유 1분.**
-환승이 있어도 나갈 시각은 삼성역 열차만 보면 되므로 삼성역만 조회합니다.
+**나갈 시각 = 열차 도착 − 도보 15분 − 여유 1분.**
+환승(삼각지 4호선)이 있어도 나갈 시각은 공덕역 열차만 보면 되므로 공덕역만 조회합니다.
 
 ![화면 4종](tools/preview/all.png)
+
+### 원본에서 바뀐 점
+
+| | 원본 | 이 fork |
+|---|---|---|
+| 용도 | 퇴근 (회사 → 삼성역) | 출근 (집 → 공덕역 → 신용산) |
+| 열차 고르기 | 지금 탈 수 있는 첫 열차 | **마감(`ARRIVE_BY`)에 맞는 열차 중 가장 늦은 열차** |
+| 시간표 방향 | `2`(하행·외선) 고정 | `UPDN_LINE` 에 따라 1/2 자동 |
+| 환승역 | — | `SUBWAY_ID` 로 다른 호선 열차를 거름 |
+| 인증키 | 1개 | 일반 키 + 실시간 지하철 키(`SEOUL_REALTIME_KEY`) |
+| 요일 | 매일 | `WORK_DAYS` 로 알바 요일만 |
+| 꺼진 시간 안내 | `퇴근 시간 아님` | `출근 시간 아님` |
+| 역 찾기 | `DATA_SOURCES.md` 보고 직접 | `tools/find_station.py` |
+| 샘플 시간표 대체 | 항상 | 삼성역 설정일 때만 (다른 역에 삼성역 열차가 뜨지 않게) |
+
+펌웨어는 원본 그대로 씁니다 (바뀐 문구의 글자가 이미 글꼴에 있음).
+
+### 어떤 열차를 고르나 (출근 마감 모드)
+
+```
+공덕에서 탈 마지막 열차 = ARRIVE_BY − ARRIVE_EARLY_MINUTES − DEST_WALK_MINUTES − RIDE_MINUTES
+                       = 17:00 − 5분(일찍 도착) − 5분(신용산→알바) − 15분(탑승·환승) = 16:35
+```
+
+1. 시간표에서 "지금 + 16분(도보 + 여유) 이후에 오는 열차" 중
+2. **16:35 이전 열차 가운데 가장 늦은 것**을 고릅니다 → 가장 여유롭게 나갈 수 있는 열차
+3. 그 열차를 놓치면 다음 열차로 넘어가고 로그에 `지각 위험` 을 남깁니다.
+
+- `ARRIVE_BY` 를 비우면 원본처럼 "지금 탈 수 있는 첫 열차"를 고릅니다.
+- 데모 모드(`--demo`)는 가짜 시계라 마감을 쓰지 않습니다.
+- `RIDE_MINUTES=15` 는 공덕 → 삼각지(4호선 환승) → 신용산 추정치입니다. 실제로 재서 고치세요.
+
+예: 2026-10-24(토)에 실행하면 `16:25:50` 열차를 골라 16:09쯤 나가라고 안내했습니다
+(토요일은 배차가 길어 그다음 열차가 16:35 를 넘음).
 
 ### 왜 이렇게 나눴나
 
 NU40 은 nRF52840 칩이라 **WiFi 가 없습니다.** 그래서 인터넷 호출·시간표 해석·"지금 나가야 하나" 판단은 전부
 PC(파이썬)가 하고, 보드는 **받은 상태를 그리고 남은 시간을 혼자 깎으며 열차를 움직이기만** 합니다.
-구조·배선·시리얼 설정은 `~/nu40-stock-ticker` 와 같습니다.
 
 ### 왜 시간표가 주인공이고 실시간은 보조인가
 
-실시간 도착정보는 방면마다 **다음 2대(약 4분 앞)** 까지만 옵니다. 그런데 도보 10분 + 여유 1분 = 11분이라
+실시간 도착정보는 방면마다 **다음 2대(약 4분 앞)** 까지만 옵니다. 그런데 도보 15분 + 여유 1분 = 16분이라
 **실시간에 보이는 열차는 이미 못 탑니다.** 그래서
 
-- **시간표** 에서 "지금 + 11분 이후 첫 열차"를 고르고 (하루 한 번 받아 `host/cache/` 에 저장)
+- **시간표** 에서 탈 열차를 고르고 (하루 한 번 받아 `host/cache/` 에 저장)
 - **실시간** 은 지금 보이는 열차들이 시간표보다 얼마나 늦는지(열차번호로 대조)를 재서 **지연 보정** 에만 씁니다.
   고른 열차 자체가 보이면 그 값을 그대로 씁니다. 실시간은 60초에 한 번만 불러 하루 한도(약 1,000건)를 지킵니다.
 
 ---
 
-## 1. 배선표 (주식 티커와 동일)
+## 1. 준비물과 배선
 
-**보드:** NUCODE NU40 DK (NU40-B-Dev02), Nordic nRF52840, USB-C
-**화면:** SSD1306, 128×64, I2C, 주소 `0x3C` (안 잡히면 `0x3D` 자동 시도)
+| 준비물 | 비고 |
+|---|---|
+| NUCODE NU40 DK (NU40-B-Dev02) | **칩안테나 DK / 핀헤더 장착(납땜 완료)** 옵션. Nordic nRF52840, USB-C |
+| 0.96인치 OLED | SSD1306, 128×64, **I2C 4핀**, 주소 `0x3C` (안 잡히면 `0x3D` 자동 시도) |
+| 점퍼선 암-암(F-F) 4가닥 | 보드·OLED 둘 다 수 핀 |
+| USB-C **데이터** 케이블 | 충전 전용 케이블은 안 됨 |
+
+납땜·브레드보드·별도 전원은 필요 없습니다.
 
 | 항목 | 핀 | USER TERMINAL 번호 |
 |---|---|---|
@@ -52,8 +95,9 @@ PC(파이썬)가 하고, 보드는 **받은 상태를 그리고 남은 시간을
 | 버튼 S1~S4 (보드 내장) | P0.11 / P0.12 / P0.24 / P0.25 | — |
 | LED 1~4 (보드 내장) | P0.13 / P0.14 / P0.15 / P0.16 | — |
 
-NU40DK 보드 패키지의 variant.h 에 `PIN_WIRE_SDA=26, PIN_WIRE_SCL=27` 이 박혀 있어
-펌웨어는 `Wire.begin()` 만 부릅니다. (5V 에 꽂으면 안 됩니다)
+- OLED 핀 순서는 제품마다 다릅니다 (산 제품은 왼쪽부터 `GND · VCC · SCL · SDA`). **핀 옆 글자를 보고** 연결하세요.
+- VCC 는 꼭 **3V3** 에. 5V 에 꽂으면 안 됩니다.
+- NU40DK 보드 패키지의 variant.h 에 `PIN_WIRE_SDA=26, PIN_WIRE_SCL=27` 이 박혀 있어 펌웨어는 `Wire.begin()` 만 부릅니다.
 
 ### 버튼과 LED
 
@@ -80,76 +124,121 @@ NU40DK 보드 패키지의 variant.h 에 `PIN_WIRE_SDA=26, PIN_WIRE_SCL=27` 이 
 3. 라이브러리: `스케치 → 라이브러리 포함하기 → 라이브러리 관리` 에서 **Adafruit SSD1306** 검색 → 설치 →
    "함께 설치할까요?"에 **전부 설치(Install all)** (`Adafruit GFX Library`, `Adafruit BusIO`)
 
-### 파이썬 (한 번만)
+### 파이썬 (한 번만, 윈도우 cmd)
 
-```bash
-cd ~/nu40-commute
-python3 -m venv .venv
-.venv/bin/pip install -r host/requirements.txt
+```cmd
+cd C:\iot\nu40-commute
+python -m venv .venv
+.venv\Scripts\pip install -r host\requirements.txt
 ```
+
+> 맥/리눅스는 `.venv/bin/python`, `.venv/bin/pip` 처럼 `/` 경로를 씁니다.
 
 ---
 
-## 3. 펌웨어 굽기 (사용자가 할 일)
+## 3. 펌웨어 굽기
 
 **방법 A — 아두이노 IDE (권장)**
 
 1. `firmware/nu40_commute/nu40_commute.ino` 를 엽니다 (폴더째로. `commute_font.h` 가 같이 열립니다).
-2. 보드 `NU40DK nRF52840`, 포트 `/dev/cu.usbmodem…` 선택 → **업로드**.
+2. 보드 `NU40DK nRF52840`, 포트 `COM3` 같은 것을 선택 → **업로드**.
+   포트가 안 보이면 `장치 관리자 → 포트(COM & LPT)` 에 보드가 잡히는지, 데이터 케이블인지 확인하세요.
 3. 화면에 `연결 대기 중…` 이 뜨면 성공입니다. 아직 PC 가 아무것도 안 보낸 상태입니다.
 
 **방법 B — UF2 드래그 (IDE 없이)**
 
-1. 보드의 **RESET 을 빠르게 두 번** 누르면 `NRF52BOOT` 같은 드라이브가 뜹니다.
+1. 보드의 **RESET 을 빠르게 두 번** 누르면 `BARAM-NU40` 같은 드라이브가 뜹니다.
 2. `build/nu40_commute/nu40_commute.uf2` 를 그 드라이브에 복사합니다.
-   (복사 중 `입력/출력 오류` 가 떠도 정상입니다. 다 받자마자 보드가 재시작합니다)
+   (복사 중 오류 메시지가 떠도 정상입니다. 다 받자마자 보드가 재시작합니다)
 
-> 업로드가 안 되면 티커 README 의 "업로드가 안 됩니다" 절과 아래 9절을 보세요.
-> 맥에서 포트가 안 생기면 `시스템 설정 → 개인정보 보호 및 보안 → 액세서리 연결 허용` 을 먼저 바꾸세요.
+> `build/` 의 UF2 는 원본 펌웨어를 컴파일한 것입니다. 펌웨어(`.ino`)를 고쳤다면 방법 A 로 구우세요.
 
 ---
 
-## 4. 설정
+## 4. 인증키와 설정
 
-인증키는 프로젝트 루트의 `.env` (`SEOUL_SUBWAY_KEY=…`) 에 이미 들어 있습니다.
-나머지 설정을 바꾸려면 `host/.env` 를 만듭니다 (둘 다 읽고, `host/.env` 가 우선):
+### 인증키 발급 (서울 열린데이터광장)
 
-```bash
-cp host/config.example.env host/.env
+1. [data.seoul.go.kr](https://data.seoul.go.kr) 회원가입 → 로그인
+2. **인증키 신청** 에서 **일반 인증키** 와 **실시간 지하철 인증키** 를 둘 다 신청
+   (사용URL 에는 이 fork 의 GitHub 주소를 넣으면 됩니다)
+3. **마이페이지 → 인증키 발급내역** 에서 복사
+
+일반 키로는 실시간을 못 씁니다 (`해당 인증키로는 실시간 서비스를 사용할 수 없습니다`).
+그래서 실시간 키는 `SEOUL_REALTIME_KEY` 에 따로 넣습니다. 비워 두면 일반 키로 시도합니다.
+
+### 설정 파일
+
+```cmd
+copy host\config.example.env host\.env
 ```
 
-| 항목 | 기본값 | 뜻 |
-|---|---|---|
-| `SEOUL_SUBWAY_KEY` | — | 서울 열린데이터광장 인증키. 데모만 쓸 땐 없어도 됨 |
-| `SERIAL_PORT` | (자동) | `/dev/cu.usbmodem1101`, `COM3` |
-| `STATION_NAME` / `STATION_CODE` | `삼성` / `0219` | 실시간 조회 역명 / 시간표 역코드 |
-| `UPDN_LINE` / `LINE_HINT` | `외선` / `종합운동장방면` | 방면 고르기 (잠실 방면) |
-| `WALK_MINUTES` / `BUFFER_MINUTES` | `10` / `1` | 회사→역 도보, 여유. 출발선 = 도착 − (도보+여유) |
-| `ON_AT` / `OFF_AT` | `18:00` / `20:00` | 화면 자동 켜짐·꺼짐 시각. 밖에선 API 도 안 부름. 둘 다 비우면 항상 켬 |
-| `REALTIME_POLL_SECONDS` | `60` | 실시간 호출 간격 (최소 30) |
-| `HOLIDAYS` | — | 공휴일 추가 (`2026-12-31,…`). 내장 목록은 `host/holidays.py` |
-| `DEMO_SPEED` | `8` | 데모 배속 |
+`host/.env` 와 프로젝트 루트의 `.env` 를 둘 다 읽고, 같은 항목은 `host/.env` 가 우선합니다.
+
+### 역·방면 값 찾기
+
+```cmd
+.venv\Scripts\python tools\find_station.py 공덕
+```
+
+```
+[1] '공덕' 역코드 (→ STATION_CODE)
+        06호선  STATION_CODE=2627
+        ...
+[2] 지금 '공덕'에 오는 열차 (→ SUBWAY_ID / UPDN_LINE / LINE_HINT)
+       6호선  SUBWAY_ID=1006  UPDN_LINE=상행  (응암순환(상선)행 - 대흥(서강대앞)방면)
+       6호선  SUBWAY_ID=1006  UPDN_LINE=하행  (봉화산행 - 효창공원앞방면)
+     경의중앙선  SUBWAY_ID=1063  UPDN_LINE=하행  (용문행 - 효창공원앞방면)
+       ...
+```
+
+- [2] 는 열차가 다니는 시간에 실행해야 나옵니다.
+- 공덕은 **경의중앙선 하행도 `효창공원앞방면`** 이라 `SUBWAY_ID=1006` 으로 6호선만 걸러야 합니다.
+
+### 설정 항목
+
+| 항목 | 기본값(코드) | 이 fork 설정 | 뜻 |
+|---|---|---|---|
+| `SEOUL_SUBWAY_KEY` | — | 일반 인증키 | 시간표·역코드 조회. 데모만 쓸 땐 없어도 됨 |
+| `SEOUL_REALTIME_KEY` | (일반 키 사용) | 실시간 지하철 인증키 | 실시간 도착정보 |
+| `SERIAL_PORT` | (자동) | (자동) | `COM3`, `/dev/cu.usbmodem1101` |
+| `STATION_NAME` | `삼성` | `공덕` | 실시간 조회 역명 ('역' 빼고) |
+| `STATION_CODE` | `0219` | `2627` | 시간표 역코드 (6호선 공덕) |
+| `SUBWAY_ID` | (거르지 않음) | `1006` | 호선 ID. 환승역에서 다른 호선 거르기 (6호선 = 1006) |
+| `UPDN_LINE` | `외선` | `하행` | 방향. `상행`/`내선` → 시간표 방향 1, `하행`/`외선` → 2 |
+| `LINE_HINT` | `종합운동장방면` | `효창공원앞방면` | `trainLineNm` 에 들어 있어야 하는 글자. 비우면 거르지 않음 |
+| `WALK_MINUTES` / `BUFFER_MINUTES` | `10` / `1` | `15` / `1` | 집→역 도보, 여유. 출발선 = 도착 − (도보 + 여유) |
+| `ARRIVE_BY` | (비움 = 원본 방식) | `17:00` | 출근 마감 시각 |
+| `RIDE_MINUTES` | `15` | `15` | 출발역 탑승 → 도착역 (환승 포함) |
+| `DEST_WALK_MINUTES` | `5` | `5` | 도착역 → 알바 장소 도보 |
+| `ARRIVE_EARLY_MINUTES` | `5` | `5` | 마감보다 이만큼 일찍 도착 |
+| `ON_AT` / `OFF_AT` | `18:00` / `20:00` | `15:40` / `16:40` | 화면 자동 켜짐·꺼짐. 밖에선 API 도 안 부름. 둘 다 비우면 항상 켬 |
+| `WORK_DAYS` | (매일) | 알바 요일 | `월,수,금` 또는 `월수금`. 다른 요일엔 화면 끔 |
+| `REALTIME_POLL_SECONDS` | `60` | `60` | 실시간 호출 간격 (최소 30) |
+| `HOLIDAYS` | — | — | 공휴일 추가 (`2026-12-31,…`). 내장 목록은 `host/holidays.py` |
+| `DEMO_SPEED` | `8` | `8` | 데모 배속 |
 
 요일 처리: 토요일은 토요일 시간표, 일요일·공휴일은 휴일 시간표를 받습니다. 공휴일 목록은
 `host/holidays.py` 에 2026년 기준으로 들어 있고 `.env` 의 `HOLIDAYS` 로 더할 수 있습니다.
+`WORK_DAYS` 에 없는 요일은 화면을 끄고 API 도 부르지 않습니다.
 
 ---
 
 ## 5. 실행과 모드
 
-```bash
-cd ~/nu40-commute
+```cmd
+cd C:\iot\nu40-commute
 
-# 1) 보드 없이 먼저 확인 (보낼 줄을 터미널에 찍는다)
-.venv/bin/python host/commute.py --demo --dry-run            # 데모: 키·인터넷 불필요
-.venv/bin/python host/commute.py --dry-run --always-on       # 실시간: 실제 API 호출
+rem 1) 보드 없이 먼저 확인 (보낼 줄을 터미널에 찍는다)
+.venv\Scripts\python host\commute.py --demo --dry-run            & rem 데모: 키·인터넷 불필요
+.venv\Scripts\python host\commute.py --dry-run --always-on       & rem 실시간: 실제 API 호출
 
-# 2) 보드에 연결해서
-.venv/bin/python host/commute.py --demo                      # 촬영용 데모 (약 45초에 한 바퀴)
-.venv/bin/python host/commute.py                             # 실시간. 18:00 에 켜지고 20:00 에 꺼짐
-.venv/bin/python host/commute.py --always-on                 # 스케줄 무시하고 지금 바로
-.venv/bin/python host/commute.py --demo --start-after 20     # 20초 동안 꺼 뒀다가 켬 (카메라 세팅용)
-.venv/bin/python host/commute.py --demo --render shot.png    # 보낼 때마다 보드 화면을 PNG 로
+rem 2) 보드에 연결해서
+.venv\Scripts\python host\commute.py --demo                      & rem 촬영용 데모 (약 45초에 한 바퀴)
+.venv\Scripts\python host\commute.py                             & rem 실시간. ON_AT 에 켜지고 OFF_AT 에 꺼짐
+.venv\Scripts\python host\commute.py --always-on                 & rem 스케줄 무시하고 지금 바로
+.venv\Scripts\python host\commute.py --demo --start-after 20     & rem 20초 동안 꺼 뒀다가 켬 (카메라 세팅용)
+.venv\Scripts\python host\commute.py --demo --render shot.png    & rem 보낼 때마다 보드 화면을 PNG 로
 ```
 
 `Ctrl+C` 로 멈춥니다. 보드를 꽂지 않고 `--dry-run` 으로 돌리면 터미널에 `BTN|2` 같은 줄을 쳐서
@@ -157,35 +246,35 @@ cd ~/nu40-commute
 
 | 옵션 | 뜻 |
 |---|---|
-| `--demo` | 가짜 시계(오늘 17:53 부터 8배속)와 가짜 시간표(18:09 부터 3분 30초 간격). 여유 15초 → 짐 싸기 16초 → 출발 8초 → 놓침 5초 → 다음 열차 |
+| `--demo` | 가짜 시계(오늘 17:53 부터 8배속)와 가짜 시간표(18:09 부터 3분 30초 간격). 마감 모드는 쓰지 않음 |
 | `--demo-speed N` | 데모 배속 바꾸기 |
 | `--dry-run` | 보드 없이. 시리얼로 보낼 줄을 `>> ` 로 출력 |
 | `--port` | 시리얼 포트 직접 지정 |
 | `--start-after N` | 시작 후 N초 동안 화면을 꺼 뒀다가 켬 |
-| `--always-on` | `ON_AT/OFF_AT` 무시 |
-| `--render PNG` | 보낼 때마다 그 장면을 PNG 로 저장 (Pillow + 갈무리9 글꼴 필요) |
+| `--always-on` | `ON_AT/OFF_AT`, `WORK_DAYS` 무시 |
+| `--render PNG` | 보낼 때마다 그 장면을 PNG 로 저장 (Pillow + 갈무리9 글꼴 필요, 6절) |
 | `--duration SEC` | 테스트용. SEC 초 뒤 종료 |
 | `--verbose` | 보드 연결 상태에서도 보내는 줄 전부 출력 |
 
 ### 켜짐/꺼짐 규칙
 
-1. **스케줄**: `ON_AT ~ OFF_AT` 안에서만 켜고, 밖에서는 `퇴근 시간 아님` 안내를 보낸 뒤 화면을 끕니다 (API 도 안 부름).
-2. **S1 버튼**: 꺼져 있으면 10초 뒤 켜짐, 켜져 있으면 바로 꺼짐. S1 로 정한 상태는 PC 가 덮어쓰지 않습니다(다음 S1 까지 유지). 꺼진 시간에 켜 보면 `퇴근 시간 아님` 이 보입니다.
+1. **스케줄**: `WORK_DAYS` 요일의 `ON_AT ~ OFF_AT` 안에서만 켜고, 밖에서는 `출근 시간 아님` 안내를 보낸 뒤 화면을 끕니다 (API 도 안 부름).
+2. **S1 버튼**: 꺼져 있으면 10초 뒤 켜짐, 켜져 있으면 바로 꺼짐. S1 로 정한 상태는 PC 가 덮어쓰지 않습니다(다음 S1 까지 유지). 꺼진 시간에 켜 보면 `출근 시간 아님` 이 보입니다.
 3. **`--start-after N`**: N초 동안 강제로 끔. 그 뒤엔 위 규칙대로.
 4. **데모 모드**: 스케줄을 무시하고 항상 켭니다.
 
-정상 로그 예:
+정상 로그 예 (2026-10-24 토요일, `--dry-run --always-on`):
 
 ```
-[18:00:01] 설정 읽음: /Users/.../nu40-commute/.env
-[18:00:01] 보드 연결: /dev/cu.usbmodem1101 (115200 baud)
-[18:00:01] 모드: 실시간
-[18:00:01] 자동 켜짐 18:00 ~ 꺼짐 20:00, 실시간은 60초마다
-[18:00:01] 화면 켬
-[18:00:02] 시간표 준비: 2026-10-22 평일 240편 (API)
-[18:00:02] 실시간: 2347 0:41, 2349 3:21 | 지연 추정 +21초 (열차 2대 대조)
-[18:00:02] 탈 열차: 18:13:30(2353) (지연 보정 +21초)
-[18:00:02] 실시간 | 탈 열차 18:13:30(2353) | 도착까지 13:49 | 나갈 때까지 2:49 | pack | 지연 +21초
+ NU40 DK 출근 알림 보드 — 공덕역 하행 (서울시 지하철 API)
+[06:13:19] 설정 읽음: C:\iot\nu40-commute\host\.env
+[06:13:19] 출발선 = 도착 16분 전 (도보 15 + 여유 1)
+[06:13:19] 마감 17:00 − 여유 5분 − 도착역 도보 5분 − 탑승 15분 → 공덕에서 16:35 이전 열차를 탑니다
+[06:13:19] 모드: 실시간
+[06:13:19] 시간표 준비: 2026-10-24 토요일 121편 (API)
+[06:13:19] 실시간: 6013 8:32, 6015 15:32 | 지연 추정 +47초 (열차 2대 대조)
+[06:13:19] 탈 열차: 16:25:50(6149) (지연 보정 +47초)
+>> S|relax|36797|1|16:25 열차 타기|도보15분|아직 여유 있어요
 ```
 
 ---
@@ -197,40 +286,47 @@ cd ~/nu40-commute
 │(얼굴)< 지금 출발해야 해요! │  y 0~14  캐릭터(14×12) + 말풍선(x17~127), 글자 y=2
 │                            │
 │      ┌11:40┐               │  y 23~35 열차 위 말풍선 = 도착까지 남은 시간 (16분 넘으면 16:00+)
-│      ▄▄▄▄▄▄▄▄  ▌     ▐▀▀▀▌ │  y 39~49 열차(32×11), 깃발(출발선 x=60), 역 간판·기둥(x117~127)
+│      ▄▄▄▄▄▄▄▄  ▌     ▐▀▀▀▌ │  y 39~49 열차(32×11), 깃발(x=60), 역 간판·기둥(x117~127)
 │━━━━━━━━━━━━━━━━━━━━━━━━━━━━│  y 50    레일, y 51 침목(흐른다)
-│18:09 열차 타기     도보10분 │  y 52    맨 아래 줄
+│16:25 열차 타기     도보15분 │  y 52    맨 아래 줄
 └────────────────────────────┘
 ```
 
 - 열차 앞코 x = `116 − round(남은초 / 960 × 82)`. 16분 전에 x=34 에서 출발해 도착 때 역(116)에 닿습니다.
-  깃발은 11분 자리(x=60). 열차가 깃발을 지나면 "놓침"입니다.
 - 보드는 PC 가 준 `남은 초` 를 혼자 1초씩 깎으며 그리므로 PC 가 5초에 한 번만 보내도 매끄럽게 움직입니다.
 - 200ms 마다 한 프레임: 침목이 1픽셀씩 흐르고, 출발 상태에선 캐릭터가 1픽셀 깡총(매 프레임), 글자가 4프레임 중 1프레임 꺼집니다.
+
+> ⚠️ **깃발 위치는 원본 그대로 "도착 11분 전"(x=60)에 고정**되어 있습니다
+> (`nu40_commute.ino` 의 `LEAVE_S = 11 * 60`, `preview.py` 의 `LEAVE_S`).
+> 이 fork 는 도보 15분 + 여유 1분 = 16분이라 실제 출발선은 레일 왼쪽 끝입니다.
+> 상태·문구·LED1 은 PC 가 16분 기준으로 정하므로 정확하고, **깃발 그림만** 실제와 다릅니다.
 
 **시안과 보드가 똑같은 이유** — 펌웨어 `drawScreen()` 은 `preview.py` 의 `render()` 를 좌표·순서 그대로 옮겼고,
 스프라이트 비트와 `x_at()` 정수식까지 같습니다. 디자인을 고칠 땐 두 파일을 같이 고치세요.
 
-```bash
-.venv/bin/python tools/preview/preview.py                    # 시안 4장 + all.png + demo.gif 다시 만들기
-.venv/bin/python tools/preview/preview.py --check-font       # 펌웨어 글꼴이 시안 렌더링과 같은지 검사
-.venv/bin/python tools/preview/preview.py --line "S|go|700|1|18:09 열차 타기|도보10분|지금 출발해야 해요!" --out x.png
+```cmd
+.venv\Scripts\python tools\preview\preview.py                    & rem 시안 4장 + all.png + demo.gif 다시 만들기
+.venv\Scripts\python tools\preview\preview.py --check-font       & rem 펌웨어 글꼴이 시안 렌더링과 같은지 검사
+.venv\Scripts\python tools\preview\preview.py --line "S|go|700|1|16:25 열차 타기|도보15분|지금 출발해야 해요!" --out x.png
 ```
 
 ### 글꼴
 
-갈무리9(Galmuri9) 픽셀 글꼴. 티커는 한글 2350자를 통째로 넣었지만, 이 보드는 **화면에 나오는 글자만**
+갈무리9(Galmuri9) 픽셀 글꼴. 이 보드는 **화면에 나오는 글자만**
 (한글 + 숫자 + 기호 67자, 약 1.8KB) 넣습니다. 숫자·기호도 갈무리9라서 시안과 모양이 같습니다.
 글자마다 폭이 달라(`1` 은 4픽셀, `4` 는 7픽셀) 폭·위치를 따로 저장합니다.
 
-```bash
-.venv/bin/python tools/make_commute_font.py                  # → firmware/nu40_commute/commute_font.h
-.venv/bin/python tools/make_commute_font.py --extra "새 글자"
+```cmd
+.venv\Scripts\python tools\make_commute_font.py                  & rem → firmware\nu40_commute\commute_font.h
+.venv\Scripts\python tools\make_commute_font.py --extra "새 글자"
 ```
 
 문구를 바꾸면 `tools/make_commute_font.py` 의 `TEXTS` 에 넣고 다시 만든 뒤 펌웨어를 다시 구워야 합니다.
 `host/commute.py` 는 시작할 때 자기 문구가 헤더에 다 있는지 검사해서 없는 글자를 경고합니다.
-(글꼴 파일: `~/Library/Fonts/Galmuri9Bitmap-Regular-2.40.3.ttf`, PIL 크기 12 로 그리면 글자가 y+2 줄부터 찍히는데 그 오프셋까지 그대로 저장)
+
+글꼴 파일 위치는 맥 기준 경로(`~/Library/Fonts/Galmuri9Bitmap-Regular-2.40.3.ttf`)로 고정되어 있습니다.
+윈도우에서는 `C:\Users\<계정>\Library\Fonts\` 폴더를 만들어 같은 파일명으로 넣으세요.
+(PIL 크기 12 로 그리면 글자가 y+2 줄부터 찍히는데 그 오프셋까지 그대로 저장)
 
 ---
 
@@ -242,12 +338,12 @@ PC 가 상태와 문구를 정하고, 보드는 그리기만 합니다.
 
 | 줄 | 뜻 |
 |---|---|
-| `S\|<state>\|<arrive_s>\|<speed>\|<bottom_left>\|<bottom_right>\|<msg>` | 화면 상태. `state` = `relax`/`pack`/`go`/`missed`, `arrive_s` = 열차 도착까지 남은 초(음수 가능), `speed` = 보드가 초를 깎는 배속(실시간 1, 데모 8), `bottom_left` = `18:09 열차 타기`, `bottom_right` = `도보10분`, `msg` = 말풍선 문구 |
-| `N\|<text>` | 안내 화면 (글자 한 줄 가운데). `연결 대기 중…`, `시간표 받는 중…`, `열차 정보 없음`, `오류… 다시 시도 중`, `퇴근 시간 아님` |
+| `S\|<state>\|<arrive_s>\|<speed>\|<bottom_left>\|<bottom_right>\|<msg>` | 화면 상태. `state` = `relax`/`pack`/`go`/`missed` ("뛰면 가능"은 `go` 로 보내고 문구만 다름), `arrive_s` = 열차 도착까지 남은 초(음수 가능), `speed` = 보드가 초를 깎는 배속(실시간 1, 데모 8), `bottom_left` = `16:25 열차 타기`, `bottom_right` = `도보15분`, `msg` = 말풍선 문구 |
+| `N\|<text>` | 안내 화면 (글자 한 줄 가운데). `연결 대기 중…`, `시간표 받는 중…`, `열차 정보 없음`, `오류… 다시 시도 중`, `출근 시간 아님` |
 | `P\|on` / `P\|off` | 화면 켜기/끄기 (OLED 자체를 재움. 카운트다운은 계속) |
 | `M\|demo` / `M\|live` | 모드 표시 (LED2) |
 
-예: `S|go|700|1|18:09 열차 타기|도보10분|지금 출발해야 해요!`
+예: `S|go|1000|1|16:25 열차 타기|도보15분|지금 출발해야 해요!`
 PC 는 상태·문구가 바뀌면 즉시, 아니면 5초(데모 2초)마다 다시 보냅니다(보드 카운트다운 재동기).
 
 ### 보드 → PC
@@ -266,13 +362,15 @@ PC 는 상태·문구가 바뀌면 즉시, 아니면 5초(데모 2초)마다 다
 
 | 무엇 | 주소 | 주기 |
 |---|---|---|
-| 시간표 | `openapi.seoul.go.kr:8088/{KEY}/json/SearchSTNTimeTableByIDService/1/300/0219/{요일}/2/` (요일 1 평일·2 토·3 휴일, 2 = 외선) | 하루 1번, `host/cache/` 에 저장. 실패하면 예전 캐시 → `samples/` 순으로 대신 씀 |
-| 실시간 | `swopenAPI.seoul.go.kr/api/subway/{KEY}/json/realtimeStationArrival/0/10/삼성` → `updnLine=외선`, `trainLineNm` 에 `종합운동장방면` | 60초 (켜진 시간대에만) |
+| 시간표 | `openapi.seoul.go.kr:8088/{KEY}/json/SearchSTNTimeTableByIDService/1/300/2627/{요일}/{방향}/` (요일 1 평일·2 토·3 휴일, 방향 1 상행·내선 / 2 하행·외선) | 하루 1번, `host/cache/timetable_{역코드}_d{방향}_w{요일}.json` 에 저장. 실패하면 예전 캐시 → (삼성역 설정일 때만) `samples/` 순으로 대신 씀 |
+| 실시간 | `swopenAPI.seoul.go.kr/api/subway/{REALTIME_KEY}/json/realtimeStationArrival/0/30/공덕` → `subwayId=1006`, `updnLine=하행`, `trainLineNm` 에 `효창공원앞방면` | 60초 (켜진 시간대에만) |
+| 역코드 | `openapi.seoul.go.kr:8088/{KEY}/json/SearchInfoBySubwayNameService/1/20/공덕` | `tools/find_station.py` 실행할 때만 |
 
+- 환승역이라 실시간을 30건까지 받고, `subwayId` 로 6호선만 남깁니다.
 - `barvlDt`(초)가 0 이면 `arvlMsg2`("1분 30초 후", "[2]번째 전역") 를 해석하고, `recptnDt` 로부터 지난 시간만큼 뺍니다.
 - 지연 추정 = 보이는 열차마다 (실시간 도착 − 시간표 도착) 의 중앙값. 열차번호(`btrainNo` = `TRAIN_NO`)로 대조하고,
   번호가 없으면 3분 안쪽의 가장 가까운 시간표 열차와 짝짓습니다. −2분 ~ +10분 밖이면 믿지 않습니다.
-- 이 역이 종착인 열차(`DESTSTATION=0219`)는 뺍니다. `ARRIVETIME` 이 `24:15:30` 처럼 24시를 넘으면 다음날로 봅니다.
+- 이 역이 종착인 열차(`DESTSTATION` = `STATION_CODE`)는 뺍니다. `ARRIVETIME` 이 `24:15:30` 처럼 24시를 넘으면 다음날로 봅니다.
 - 인증키는 로그·오류 메시지에 절대 찍지 않습니다 (예외 메시지도 형 이름만 출력).
 
 ---
@@ -281,12 +379,17 @@ PC 는 상태·문구가 바뀌면 즉시, 아니면 5초(데모 2초)마다 다
 
 | 증상 | 확인 |
 |---|---|
-| 화면이 안 켜짐 | 티커의 `tools/i2c_scan` 으로 `0x3C` 확인 → SDA/SCL 바꿔 꽂기 → VCC 가 3V3 인지 → 점퍼선 교체. 시리얼 모니터에 `ERR\|No OLED` 가 반복되면 배선 문제 |
+| 화면이 안 켜짐 | VCC 가 3V3 인지 → SDA/SCL 바꿔 꽂기 → 점퍼선 교체. 시리얼 모니터에 `ERR\|No OLED` 가 반복되면 배선 문제 |
 | 화면이 `연결 대기 중…` 에서 안 바뀜 | PC 프로그램이 안 돌고 있거나 포트가 다름. `--dry-run` 없이 실행했는지, 아두이노 시리얼 모니터를 닫았는지 확인 |
-| 화면이 꺼져 있음 | `ON_AT~OFF_AT` 밖이면 정상. S1 을 누르거나 `--always-on` |
-| `보드를 찾지 못했습니다` | 데이터 케이블인지, `ls /dev/cu.usb*`, `--port` 로 직접 지정. 맥은 `액세서리 연결 허용` 설정 |
+| 화면이 꺼져 있음 | `WORK_DAYS` 요일의 `ON_AT~OFF_AT` 밖이면 정상. S1 을 누르거나 `--always-on` |
+| `보드를 찾지 못했습니다` | 데이터 케이블인지, 장치 관리자의 `포트(COM & LPT)` 확인, `--port COM3` 으로 직접 지정 |
 | `시리얼 포트를 열 수 없습니다` | 아두이노 IDE 시리얼 모니터를 닫으세요 (포트는 한 프로그램만) |
+| `해당 인증키로는 실시간 서비스를 사용할 수 없습니다` | 일반 키로 실시간을 부름. `SEOUL_REALTIME_KEY` 에 실시간 지하철 키를 넣으세요 |
 | `실시간 응답 오류: ERROR-3xx` | 키가 틀렸거나 하루 한도 초과. `REALTIME_POLL_SECONDS` 를 늘리세요 |
+| 다른 호선 열차가 섞임 / 지연 추정이 이상함 | `SUBWAY_ID` 를 넣었는지 (6호선 = 1006) |
+| `열차 정보 없음` / `오류… 다시 시도 중` | 시간표를 못 받음. `STATION_CODE` 와 일반 키 확인. 다른 역은 샘플로 대체하지 않습니다 |
+| 로그에 `지각 위험` | 마감에 맞는 열차를 놓쳐 다음 열차로 안내 중 |
+| `.venv` 는 내부 또는 외부 명령… 이 아닙니다 | 윈도우는 `.venv\Scripts\python` (역슬래시, `bin` 아님) |
 | 한글 자리가 비어 있음 | 그 글자가 `commute_font.h` 에 없음. 6절 글꼴 참고 (실행 로그에 경고가 뜹니다) |
 | 글자 전체가 깨짐 | 속도가 115200 인지 |
 | 공휴일인데 평일 시간표 | `host/holidays.py` 나 `.env` 의 `HOLIDAYS` 에 날짜 추가 |
@@ -297,24 +400,25 @@ PC 는 상태·문구가 바뀌면 즉시, 아니면 5초(데모 2초)마다 다
 ## 10. 파일 구성
 
 ```
-firmware/nu40_commute/nu40_commute.ino   보드 펌웨어 (그리기·카운트다운·버튼·LED)
+firmware/nu40_commute/nu40_commute.ino   보드 펌웨어 (그리기·카운트다운·버튼·LED) — 원본 그대로
 firmware/nu40_commute/commute_font.h      글꼴 데이터 (자동 생성물, 고치지 말 것)
-host/commute.py                           PC 프로그램: API → 탈 열차 → 상태 → 시리얼
+host/commute.py                           PC 프로그램: API → 탈 열차(마감 모드) → 상태 → 시리얼
 host/holidays.py                          공휴일 목록·요일 판정
 host/config.example.env                   설정 템플릿 (복사해서 host/.env)
 host/requirements.txt                     파이썬 라이브러리
 host/cache/                               시간표 캐시 (자동 생성)
+tools/find_station.py                     역코드·호선·방향 찾기 (이 fork 에서 추가)
 tools/make_commute_font.py                글꼴 헤더 생성기
 tools/preview/preview.py                  화면 시안 = 디자인 기준 (PNG/GIF, --line, --check-font)
 tools/preview/*.png, demo.gif             시안 이미지
-samples/                                  API 응답 샘플 (키 없이 돌려 볼 때 시간표 대용)
-build/nu40_commute/nu40_commute.uf2       컴파일된 펌웨어 (드래그로 굽기)
-DATA_SOURCES.md                           데이터 출처 조사 기록
-.env                                      SEOUL_SUBWAY_KEY (깃에 안 올라감)
+samples/                                  API 응답 샘플 (삼성역. 키 없이 돌려 볼 때 시간표 대용)
+build/nu40_commute/nu40_commute.uf2       컴파일된 원본 펌웨어 (드래그로 굽기)
+DATA_SOURCES.md                           데이터 출처 조사 기록 (원본, 삼성역 기준)
+host/.env                                 인증키·설정 (깃에 안 올라감)
 ```
 
 ## 11. 보안
 
 - `.env` 는 `.gitignore` 에 있어 깃에 올라가지 않습니다.
-- 인증키는 어떤 로그에도 찍지 않습니다. 키가 든 URL 도 출력하지 않습니다.
-- 이 프로그램은 조회 API 두 개만 부릅니다.
+- 인증키(일반·실시간 둘 다)는 어떤 로그에도 찍지 않습니다. 키가 든 URL 도 출력하지 않습니다.
+- 이 프로그램은 조회 API 만 부릅니다 (시간표·실시간, `find_station.py` 는 역코드 조회도).
