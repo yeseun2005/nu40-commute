@@ -43,10 +43,10 @@
 // 하드웨어 설정 (주식 티커와 동일. 회로도로 확인한 값이라 바꾸지 마세요)
 // ─────────────────────────────────────────────────────────────
 
-// OLED 는 P0.26(SDA) / P0.27(SCL). NU40DK 보드 패키지의 variant.h 가 이미
-// PIN_WIRE_SDA=26, PIN_WIRE_SCL=27 로 잡아 두어서 Wire.begin() 기본값이 곧 이 핀입니다.
-static const uint8_t PIN_OLED_SDA = PIN_WIRE_SDA;  // = 26 (P0.26)
-static const uint8_t PIN_OLED_SCL = PIN_WIRE_SCL;  // = 27 (P0.27)
+// OLED 는 P0.08(SDA) / P0.07(SCL).
+// 기본값은 P0.26/P0.27 이지만, 이 보드는 그 두 핀 접촉이 불안정해서 옮겼다. setup() 에서 Wire.setPins() 로 지정한다.
+static const uint8_t PIN_OLED_SDA = 8;   // P0.08
+static const uint8_t PIN_OLED_SCL = 7;   // P0.07
 
 // 보드 내장 버튼 4개. 누르면 LOW 라서 INPUT_PULLUP 으로 읽습니다.
 //   S1 = 화면 켜기/끄기 토글, S2 = 데모/실시간 전환 요청(PC 에 알림), S3·S4 = 예비(PC 에 알림만)
@@ -65,7 +65,7 @@ static const uint8_t OLED_ADDR_ALT  = 0x3D;
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1   // NU40DK 에는 화면 리셋 전용 핀이 없다
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET, 100000UL, 100000UL);  // I2C 100kHz (전송 중·후 모두)
 
 // ─────────────────────────────────────────────────────────────
 // 화면 배치 상수 (tools/preview/preview.py 와 반드시 같아야 함)
@@ -175,9 +175,10 @@ void setup() {
   for (uint8_t i = 0; i < 4; i++) pinMode(BUTTON_PINS[i], INPUT_PULLUP);
   for (uint8_t i = 0; i < 4; i++) { pinMode(LED_PINS[i], OUTPUT); digitalWrite(LED_PINS[i], LOW); }
 
-  // I2C 시작. NU40DK 기본값이 이미 P0.26/P0.27 이라 핀 지정이 필요 없다.
+  // I2C 시작. 기본 핀(P0.26/P0.27) 대신 P0.08/P0.07 을 쓴다.
+  Wire.setPins(PIN_OLED_SDA, PIN_OLED_SCL);
   Wire.begin();
-  Wire.setClock(400000);  // 400kHz. 200ms 마다 전체 화면을 다시 보내므로 빠른 쪽이 좋다
+  Wire.setClock(100000);  // 100kHz. 점퍼선이 길면 400kHz 에서 화면이 깨지고 멈춰서 낮춤
 
   displayOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_MAIN);
   if (!displayOk) displayOk = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR_ALT);
@@ -190,7 +191,7 @@ void setup() {
 
   Serial.println("READY");
   if (!displayOk) {
-    Serial.println("ERR|OLED not found. Check wiring: SDA=P0.26, SCL=P0.27, VCC=3V3, GND.");
+    Serial.println("ERR|OLED not found. Check wiring: SDA=P0.08, SCL=P0.07, VCC=VMOD, GND.");
   }
 }
 
